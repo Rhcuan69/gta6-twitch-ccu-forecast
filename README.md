@@ -14,21 +14,24 @@ by mean pinball loss on the log scale.
 
 ## Model (`main.py`, Python 3.13, standard library only, no network, deterministic)
 
-A nearest-neighbour ratio curve over the case's comparable past launches:
+A kernel-weighted ratio curve over the case's comparable past launches:
 
 - Each comparable gives a release-day curve: its hourly Twitch viewers
   for the 24 UTC hours of its release day. Only comparables with an
   hour-1 print and at least 12 scored hours are usable; the case's own
   game (the GTA VI pre-release category entry) is excluded by name.
-- Take the 15 comparables whose hour-1 print is nearest in log space to
-  the case's hour-1 print. Console-only launches (no "PC" in platforms)
-  count twice: GTA VI is console-only with a rolling midnight unlock, so
-  they are the closest analogues.
-- Per hour h, the median log-ratio `ln(viewers_h / viewers_1)` over the
-  fit set is the median forecast; the spread is the sample standard
-  deviation of those log-ratios (floored at 0.15, capped at 1.5),
-  applied with the standard-normal quantiles
-  z = (-1.645, -0.674, 0, 0.674, 1.645).
+- Every usable comparable contributes, weighted by how close its hour-1
+  print is to the case's: a Gaussian kernel on the log distance,
+  exp(-d^2 / 2) with d = |ln(h1 / p1)|. There is no hard neighbour
+  cutoff, so the fit degrades smoothly when the target sits outside the
+  comparables' range (as GTA VI's launch likely will). Console-only
+  launches (no "PC" in platforms) count twice: GTA VI is console-only
+  with a rolling midnight unlock, so they are the closest analogues.
+- Per hour h, the weighted median log-ratio `ln(viewers_h / viewers_1)`
+  over the fit set, shrunk 0.9 toward persistence, is the median
+  forecast; the spread is the weighted standard deviation of those
+  log-ratios (floored at 0.15, capped at 1.5), applied with the
+  standard-normal quantiles z = (-1.645, -0.674, 0, 0.674, 1.645).
 - Hours with fewer than 3 fit launches fall back to the house
   persistence formula.
 
@@ -37,21 +40,25 @@ A nearest-neighbour ratio curve over the case's comparable past launches:
 Leave-one-out backtest on the kit's 38 comparable launches, scored with
 the official pinball loss (mean over launches):
 
-| model | big launches (hour-1 ≥ 20k) | console-only big | all 37 usable |
+| model | big launches (hour-1 ≥ 20k) | huge launches (hour-1 ≥ 100k) | all 37 usable |
 |---|---|---|---|
-| house baseline (flat at hour-1 print) | 0.3214 | ~0.25 | 0.9297 |
-| **this entry (NN-15, console x2)** | **0.2532** | **0.1765** | 0.6171 |
+| house baseline (flat at hour-1 print) | 0.3214 | 0.2611 | 0.9297 |
+| round 1 (nearest 15, console x2) | 0.2532 | 0.2226 | 0.6165 |
+| **this entry (kernel σ=1.0, console x2, shrink 0.9)** | **0.2522** | **0.2140** | **0.4168** |
 
-The big-launch column is the one that matters: GTA VI's hour-1 print
-will be large, and all four practice launches are big console launches
-(hour-1 prints 23k–270k). Fitting on all launches is worse for big
-targets (0.4228) because small launches' curves explode from tiny
-hour-1 prints and drag the median curve up. Nearest neighbours by log
-hour-1 print adapt the fit to the case's scale; doubling console-only
-launches helps both big launches (0.2659 → 0.2532) and console launches
-(0.1895 → 0.1765). Spread multipliers 0.8 / 1.2 were both slightly
-worse than 1.0, and a spread floor (0.10–0.20) changed nothing, so the
-spread stays the raw residual standard deviation with a 0.15 floor.
+The huge-launch column is the one that matters most: GTA VI's hour-1
+print will likely be the largest ever, far above the biggest comparable
+(God of War Ragnarok, 270k). A hard top-15 cutoff treats the 15th and
+16th neighbours identically and ignores how far the target sits from
+them; the Gaussian kernel weights every comparable by its log distance,
+so the fit follows the target's scale smoothly and still behaves
+sensibly when the target extrapolates beyond all comparables. Shrinking
+the median centre 0.9 toward persistence helps big and huge launches a
+little (0.2532 → 0.2522, 0.2226 → 0.2140) and never hurt a subset.
+Empirical quantiles and asymmetric spreads were both worse than the
+normal-quantile spread, and spread multipliers 0.8 / 1.2 were both
+slightly worse than 1.0, so the spread stays the weighted residual
+standard deviation with a 0.15 floor.
 
 Small launches (hour-1 under 20k) are still forecast poorly by every
 model tried (baseline 2.57, this entry 0.96–1.80): their hour-1 print

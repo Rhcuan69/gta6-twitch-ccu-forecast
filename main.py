@@ -5,19 +5,24 @@ hour (hours 2..24, five quantiles each), from the case's hour-1 print and the
 comparable past launches the case ships.
 
 Method (fitted on the kit's 38 comparable launches; leave-one-out pinball
-loss 0.253 on big launches with hour-1 >= 20k viewers, vs 0.321 for the house
-persistence baseline; 0.177 on console-only big launches vs ~0.25 baseline):
+loss 0.252 on big launches with hour-1 >= 20k viewers, 0.214 on huge launches
+with hour-1 >= 100k, 0.417 overall, vs 0.321 / 0.261 / 0.930 for the house
+persistence baseline):
   - Each comparable gives a release-day curve: its hourly viewers for the 24
     UTC hours of its release day. Only comparables with an hour-1 print and
     at least 12 scored hours are usable. The case's own game (the GTA VI
     pre-release category entry) is excluded by name.
-  - For the case, take the 15 comparables whose hour-1 print is nearest in
-    log space to the case's hour-1 print. Console-only launches (no "PC" in
-    platforms) count twice: GTA VI is console-only with a rolling midnight
-    unlock, so they are the closest analogues.
-  - Per hour h, the median log-ratio ln(viewers_h / viewers_1) over the fit
-    set is the median forecast; the spread is the sample standard deviation
-    of those log-ratios (floored at 0.15, capped at 1.5), applied with the
+  - Every usable comparable contributes, weighted by how close its hour-1
+    print is to the case's: a Gaussian kernel on the log distance,
+    exp(-d^2 / 2), d = |ln(h1 / p1)|, so there is no hard neighbour cutoff
+    and the fit degrades smoothly when the target sits outside the
+    comparables' range (as GTA VI's launch likely will). Console-only
+    launches (no "PC" in platforms) count twice: GTA VI is console-only
+    with a rolling midnight unlock, so they are the closest analogues.
+  - Per hour h, the weighted median log-ratio ln(viewers_h / viewers_1)
+    over the fit set, shrunk 0.9 toward persistence, is the median
+    forecast; the spread is the weighted standard deviation of those
+    log-ratios (floored at 0.15, capped at 1.5), applied with the
     standard-normal quantiles z = (-1.645, -0.674, 0, 0.674, 1.645).
   - Hours with fewer than 3 fit launches fall back to the house persistence
     formula. Everything is deterministic: sorted inputs, no randomness.
@@ -41,9 +46,10 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 Z = [-1.645, -0.674, 0, 0.674, 1.645]
 
-# Nearest neighbours by log hour-1 print; console-only launches weighted x2.
-K_NEIGHBOURS = 15
+# Gaussian kernel on the log hour-1 distance; console-only launches weighted x2.
+KERNEL_SIGMA = 1.0
 CONSOLE_WEIGHT = 2
+CENTER_SHRINK = 0.9
 MIN_CURVE_HOURS = 12
 MIN_FIT_PER_HOUR = 3
 SPREAD_FLOOR = 0.15
@@ -87,18 +93,23 @@ def is_console_only(comp: dict) -> bool:
     return "pc" not in (comp.get("platforms") or "").lower()
 
 
-def median(xs: list) -> float:
-    xs = sorted(xs)
-    n = len(xs)
-    return xs[n // 2] if n % 2 else 0.5 * (xs[n // 2 - 1] + xs[n // 2])
+def wmedian(pairs: list) -> float:
+    """Weighted median of (value, weight) pairs."""
+    total = sum(w for _, w in pairs)
+    acc = 0.0
+    for v, w in sorted(pairs):
+        acc += w
+        if acc >= total / 2:
+            return v
+    return pairs[-1][0]
 
 
-def stdev(xs: list) -> float:
-    n = len(xs)
-    if n < 2:
+def wsd(pairs: list, center: float) -> float:
+    """Weighted standard deviation of (value, weight) pairs around center."""
+    total = sum(w for _, w in pairs)
+    if total <= 0:
         return 0.0
-    m = sum(xs) / n
-    return math.sqrt(sum((x - m) ** 2 for x in xs) / (n - 1))
+    return math.sqrt(sum(w * (v - center) ** 2 for v, w in pairs) / total)
 
 
 def baseline_row(p1: float, h: int) -> list:
@@ -112,37 +123,31 @@ def forecast_case(case: dict, name: str) -> dict:
     p1 = max(1, first.get("viewers") or 1)
     game_name = (case.get("game") or {}).get("name", "").lower()
 
-    # Usable comparable curves, excluding the case's own game.
-    curves = []
+    # Usable comparable curves with kernel weights, excluding the case's game.
+    weighted = []
     for comp in case.get("comparables") or []:
         if game_name and game_name in (comp.get("name") or "").lower():
             continue
         curve = release_day_curve(comp)
         if 1 in curve and len(curve) >= MIN_CURVE_HOURS:
-            curves.append((curve[1], curve, is_console_only(comp)))
-
-    # 15 nearest by log hour-1 print; console-only launches count twice.
-    ranked = sorted(
-        curves, key=lambda c: (abs(math.log(c[0] / p1)), c[1].get(1, 0))
-    )[:K_NEIGHBOURS]
-    fit = []
-    for h1, curve, console in ranked:
-        fit.append(curve)
-        if console:
-            fit.extend([curve] * (CONSOLE_WEIGHT - 1))
+            d = abs(math.log(curve[1] / p1))
+            w = (CONSOLE_WEIGHT if is_console_only(comp) else 1) * math.exp(
+                -(d / KERNEL_SIGMA) ** 2 / 2
+            )
+            weighted.append((curve, w))
 
     hours = []
     for row in case["forecast"]:
         h = row["hour"]
-        logs = [
-            math.log(c[h] / c[1]) for c in fit if 1 in c and h in c
+        pairs = [
+            (math.log(c[h] / c[1]), w) for c, w in weighted if 1 in c and h in c
         ]
-        if len(logs) < MIN_FIT_PER_HOUR:
+        if len(pairs) < MIN_FIT_PER_HOUR:
             q = baseline_row(p1, h)
         else:
-            med = median(logs)
-            sd = min(max(stdev(logs), SPREAD_FLOOR), SPREAD_CAP)
-            q50 = p1 * math.exp(med)
+            med = wmedian(pairs)
+            sd = min(max(wsd(pairs, med), SPREAD_FLOOR), SPREAD_CAP)
+            q50 = p1 * math.exp(med * CENTER_SHRINK)
             q = [round2(q50 * math.exp(z * sd)) for z in Z]
         # Keep quantiles strictly valid: finite, > 0, non-decreasing.
         q = [max(0.01, v) for v in q]
