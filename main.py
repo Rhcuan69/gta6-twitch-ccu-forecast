@@ -109,7 +109,7 @@ def forecast_case(case: dict, name: str) -> dict:
     first = next((k for k in case.get("known") or [] if k.get("hour") == 1), None)
     if first is None:
         raise ValueError(f"{name} has no hour-1 print")
-    p1 = max(1, first["viewers"])
+    p1 = max(1, first.get("viewers") or 1)
     game_name = (case.get("game") or {}).get("name", "").lower()
 
     # Usable comparable curves, excluding the case's own game.
@@ -164,7 +164,7 @@ def main() -> None:
                 (k for k in case.get("known") or [] if k.get("hour") == 1),
                 None,
             )
-            p1 = max(1, first["viewers"]) if first else 1
+            p1 = max(1, first.get("viewers") or 1) if first else 1
             forecast = {
                 "hours": [
                     {"hour": row["hour"], "q": baseline_row(p1, row["hour"])}
